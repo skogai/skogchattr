@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 log = logging.getLogger(__name__)
 
@@ -933,12 +934,29 @@ _ALL_TOOLS = [
 
 
 def _create_server(port: int) -> FastMCP:
+    # FastMCP auto-enables DNS-rebinding protection when host="127.0.0.1",
+    # restricting Host headers to 127.0.0.1/localhost/::1. We front this
+    # server with a Cloudflare Access tunnel on *.skogai.se, so those
+    # hostnames need to be allowed too — Access already gates who reaches
+    # them, this just lets validated requests past the Host check.
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "127.0.0.1:*", "localhost:*", "[::1]:*",
+            "3000.skogai.se", "3001.skogai.se", "3002.skogai.se",
+        ],
+        allowed_origins=[
+            "http://127.0.0.1:*", "http://localhost:*",
+            "https://3000.skogai.se", "https://3001.skogai.se", "https://3002.skogai.se",
+        ],
+    )
     server = FastMCP(
         "agentchattr",
         host="127.0.0.1",
         port=port,
         log_level="ERROR",
         instructions=_MCP_INSTRUCTIONS,
+        transport_security=security,
     )
     for func in _ALL_TOOLS:
         server.tool()(func)

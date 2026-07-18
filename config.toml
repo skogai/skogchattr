@@ -1,6 +1,6 @@
 [server]
-port = 8300
-host = "127.0.0.1"
+port = 3001
+host = "0.0.0.0"
 data_dir = "./data"
 
 # Add agents here. Each gets a status pill, @mention routing, and color.
@@ -83,8 +83,8 @@ default = "none"
 max_agent_hops = 4
 
 [mcp]
-http_port = 8200
-sse_port = 8201
+http_port = 3000
+sse_port = 3002
 
 [images]
 upload_dir = "./uploads"
