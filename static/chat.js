@@ -13,7 +13,8 @@ let agentConfig = {};  // { name: { color, label } } — registered instances (u
 let baseColors = {};   // { name: { color, label } } — base agent colors (for message coloring)
 let todos = {};  // { msg_id: "todo" | "done" }
 let rules = [];  // array of rule objects from server
-let activeMentions = new Set();  // agent names with pre-@ toggled on
+let activeMentions = new Set();  // agent names with pre-@ toggled on (for the active channel)
+let _channelMentions = {};  // channel -> array of toggled agent names (per-channel memory of activeMentions)
 let replyingTo = null;  // { id, sender, text } or null
 let unreadCount = 0;    // messages received while scrolled up
 let lastMessageDate = null;  // track date for dividers (general channel)
@@ -409,6 +410,12 @@ function connectWebSocket() {
                 activeMentions.delete(event.old_name);
                 activeMentions.add(event.new_name);
             }
+            // Migrate the per-channel remembered toggles too
+            for (const ch of Object.keys(_channelMentions)) {
+                const arr = _channelMentions[ch];
+                const idx = arr.indexOf(event.old_name);
+                if (idx !== -1) arr[idx] = event.new_name;
+            }
             // Update sender name, color, and avatar on all existing messages in the DOM
             const newColor = getColor(event.new_name);
             const newAvatar = getAvatarSvg(event.new_name);
@@ -570,7 +577,8 @@ function connectWebSocket() {
                 const container = document.getElementById('messages');
                 const toRemove = [];
                 for (const el of container.children) {
-                    if (el.dataset.id && (el.dataset.channel || 'general') === clearChannel) {
+                    const isDivider = el.classList.contains('date-divider');
+                    if ((el.dataset.id || isDivider) && (el.dataset.channel || 'general') === clearChannel) {
                         toRemove.push(el);
                     }
                 }
@@ -584,6 +592,7 @@ function connectWebSocket() {
                 lastMessageDate = null;
                 lastMessageDates = {};
             }
+            dayFloatRefresh();
             requestAnimationFrame(() => {
                 const _clearDbgAfter = _clearDbgList ? _clearDbgList.children.length : -1;
                 console.log('CLEAR_DEBUG after clear (next frame), jobs-panel-children=' + _clearDbgAfter);
@@ -657,6 +666,69 @@ function maybeInsertDateDivider(container, msg) {
         }
         container.appendChild(divider);
     }
+}
+
+// --- Floating day indicator ---
+
+let dayFloatDividers = null;   // live HTMLCollection — follows divider add/remove
+let dayFloatFadeTimer = null;
+let dayFloatRafPending = false;
+
+function dayFloatLabel() {
+    if (!dayFloatDividers) {
+        const container = document.getElementById('messages');
+        if (!container) return null;
+        dayFloatDividers = container.getElementsByClassName('date-divider');
+    }
+    const scroll = document.getElementById('timeline');
+    if (!scroll) return null;
+    const top = scroll.getBoundingClientRect().top;
+    let label = null;
+    for (const d of dayFloatDividers) {
+        if (d.style.display === 'none') continue;
+        if (d.getBoundingClientRect().top <= top) {
+            label = d.textContent;
+        } else {
+            break;
+        }
+    }
+    return label;
+}
+
+function dayFloatHide() {
+    const float = document.getElementById('day-float');
+    if (!float) return;
+    if (dayFloatFadeTimer) { clearTimeout(dayFloatFadeTimer); dayFloatFadeTimer = null; }
+    float.classList.remove('visible');
+}
+
+function dayFloatOnScroll() {
+    if (dayFloatRafPending) return;
+    dayFloatRafPending = true;
+    requestAnimationFrame(() => {
+        dayFloatRafPending = false;
+        const float = document.getElementById('day-float');
+        if (!float) return;
+        const label = dayFloatLabel();
+        if (!label) { dayFloatHide(); return; }
+        float.querySelector('span').textContent = label;
+        float.classList.add('visible');
+        if (dayFloatFadeTimer) clearTimeout(dayFloatFadeTimer);
+        dayFloatFadeTimer = setTimeout(() => {
+            dayFloatFadeTimer = null;
+            float.classList.remove('visible');
+        }, 1200);
+    });
+}
+
+function dayFloatRefresh() {
+    // Recompute without starting the show/fade cycle: swap the label if the
+    // pill is relevant, hide (cancelling any fade) if no day is above the top.
+    const float = document.getElementById('day-float');
+    if (!float) return;
+    const label = dayFloatLabel();
+    if (!label) { dayFloatHide(); return; }
+    float.querySelector('span').textContent = label;
 }
 
 // --- Messages ---
@@ -810,7 +882,7 @@ function appendMessage(msg) {
                 ).join('') + '</div>';
             }
         }
-        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span></div><div class="msg-text">${textHtml}</div>${choicesHtml}${attachmentsHtml}<button class="convert-job-pill" onclick="startJobFromMessage(${msg.id}); event.stopPropagation();" title="Convert to job">convert to job</button><button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
+        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span><span class="msg-num">#${msg.id}</span></div><div class="msg-text">${textHtml}</div>${choicesHtml}${attachmentsHtml}<button class="convert-job-pill" onclick="startJobFromMessage(${msg.id}); event.stopPropagation();" title="Convert to job">convert to job</button><button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
         if (todoStatus) el.classList.add('msg-todo', `msg-todo-${todoStatus}`);
         if (msg.metadata?.session_output) el.classList.add('session-output');
 
@@ -2492,6 +2564,7 @@ function setupScroll() {
             unreadCount = 0;
         }
         updateScrollAnchor();
+        dayFloatOnScroll();
     });
 
     // Keep pinned to bottom when content changes (e.g. images load)
@@ -2908,6 +2981,19 @@ function renderTodosPanel() {
 }
 
 // --- Mention toggles ---
+
+// Called by switchChannel (channels.js) so the sticky @-tag toggles are
+// remembered per channel. Prevents carrying a tag (e.g. @codex from #bugfixing)
+// into a channel where you meant to tag someone else.
+window._onChannelSwitchMentions = function(oldChannel, newChannel) {
+    if (oldChannel) _channelMentions[oldChannel] = [...activeMentions];
+    activeMentions = new Set(_channelMentions[newChannel] || []);
+    // Reflect the swapped state on the toggle buttons
+    for (const btn of document.querySelectorAll('.mention-toggle')) {
+        btn.classList.toggle('active', activeMentions.has(btn.dataset.agent));
+    }
+    if (typeof updateSchedulePopoverState === 'function') updateSchedulePopoverState();
+};
 
 function buildMentionToggles() {
     const container = document.getElementById('mention-toggles');

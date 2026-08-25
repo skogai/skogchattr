@@ -2127,6 +2127,20 @@ body.channels-in-sidebar #channel-bar {
     color: var(--text-dim);
 }
 
+/* Permanent message-id badge, shown just after the time as "15:49:04 | #2442".
+   The id is the same number agents use to reference messages. */
+.msg-num {
+    font-size: 11px;
+    color: var(--text-dim);
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+}
+.msg-num::before {
+    content: "|";
+    margin-right: 5px;
+    opacity: 0.55;
+}
+
 .msg-sender {
     font-weight: 700;
     font-size: 13px;
@@ -2551,6 +2565,38 @@ body.channels-in-sidebar #channel-bar {
     flex: 1;
     height: 1px;
     background: var(--border);
+}
+
+/* --- Floating day indicator --- */
+
+#day-float {
+    position: sticky;
+    top: 8px;
+    height: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    z-index: 6;
+    pointer-events: none;
+}
+
+#day-float span {
+    background: var(--bg-msg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-full);
+    padding: 3px 10px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    text-indent: 0.06em;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+
+#day-float.visible span {
+    opacity: 1;
 }
 
 /* --- Code copy button --- */
