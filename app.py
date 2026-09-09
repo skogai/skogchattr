@@ -49,6 +49,9 @@ session_token: str = ""
 # Room settings (persisted to data/settings.json)
 room_settings: dict = {
     "title": "agentchattr",
+    # Shown beside the title, so several servers can be told apart without
+    # renaming the product itself. "" hides it.
+    "subtitle": "",
     "username": "user",
     "font": "sans",
     "channels": ["general"],
@@ -59,7 +62,6 @@ room_settings: dict = {
 
 # Channel validation
 _CHANNEL_NAME_RE = _re.compile(r'^[a-z0-9][a-z0-9\-]{0,19}$')
-MAX_CHANNELS = 8
 
 # Agent hats (persisted to data/hats.json)
 agent_hats: dict[str, str] = {}  # { agent_name: svg_string }
@@ -124,6 +126,30 @@ def _settings_path() -> Path:
     return Path(data_dir) / "settings.json"
 
 
+ROOM_SUBTITLE_MAX = 40
+
+
+def normalize_room_subtitle(value):
+    """Clean a room subtitle, or return None if it is not usable.
+
+    Collapses any internal whitespace so a pasted newline cannot break the
+    header across two lines, and caps the length so a long name cannot crowd
+    out the rest of the header.
+    """
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split())[:ROOM_SUBTITLE_MAX]
+
+
+def apply_room_subtitle(new: dict):
+    """Apply a subtitle from a settings payload, if present and usable."""
+    if "subtitle" not in new:
+        return
+    cleaned = normalize_room_subtitle(new["subtitle"])
+    if cleaned is not None:
+        room_settings["subtitle"] = cleaned
+
+
 def _load_settings():
     global room_settings
     p = _settings_path()
@@ -133,6 +159,9 @@ def _load_settings():
             room_settings.update(saved)
         except Exception:
             pass
+    # settings.json is hand-editable, so the file bypasses every check the
+    # live update path applies. Re-normalise on load rather than trust it.
+    room_settings["subtitle"] = normalize_room_subtitle(room_settings.get("subtitle")) or ""
     # Ensure "general" always exists and is first
     if "channels" not in room_settings or not room_settings["channels"]:
         room_settings["channels"] = ["general"]
@@ -411,7 +440,7 @@ def configure(cfg: dict, session_token: str = ""):
                         store.add(name, f"{name} disconnected", msg_type="leave", channel=_agent_last_channel.get(name, _last_active_channel))
 
                 # Clear leave debounce for agents that came back online
-                _posted_leave -= currently_online
+                _posted_leave.difference_update(currently_online)
 
                 # Detect other agents (non-registered) going offline
                 went_offline = (_known_online - currently_online) - timed_out
@@ -1103,8 +1132,14 @@ async def websocket_endpoint(websocket: WebSocket):
     # Sort history by timestamp to interleave messages from different channels correctly
     history.sort(key=lambda m: m.get("timestamp", 0))
     
-    for msg in history:
-        await websocket.send_text(json.dumps({"type": "message", "data": msg}))
+    # Saved messages have their own boundary; presence updates can arrive at
+    # any time and must never make old history look like new chat.
+    for offset in range(0, len(history), 100):
+        await websocket.send_text(json.dumps({
+            "type": "history", "messages": history[offset:offset + 100],
+        }))
+        await asyncio.sleep(0)
+    await websocket.send_text(json.dumps({"type": "history_complete"}))
 
     # Send status
     await broadcast_status()
@@ -1220,7 +1255,10 @@ async def websocket_endpoint(websocket: WebSocket):
             elif event.get("type") in ("decision_approve", "rule_activate"):
                 rid = event.get("id")
                 if rid is not None:
-                    rules.activate(int(rid))
+                    if not rules.activate(int(rid)):
+                        await websocket.send_text(json.dumps({
+                            "type": "rule_error", "error": "Rule no longer exists. Refresh the page.",
+                        }))
                 continue
 
             elif event.get("type") in ("decision_unapprove", "rule_deactivate"):
@@ -1265,6 +1303,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 new = event.get("data", {})
                 if "title" in new and isinstance(new["title"], str):
                     room_settings["title"] = new["title"].strip() or "agentchattr"
+                apply_room_subtitle(new)
                 if "username" in new and isinstance(new["username"], str):
                     room_settings["username"] = new["username"].strip() or "user"
                 if "font" in new and new["font"] in ("mono", "serif", "sans"):
@@ -1380,8 +1419,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not name or not _CHANNEL_NAME_RE.match(name):
                     continue
                 if name in room_settings["channels"]:
-                    continue
-                if len(room_settings["channels"]) >= MAX_CHANNELS:
                     continue
                 room_settings["channels"].append(name)
                 _save_settings()
@@ -1595,29 +1632,46 @@ async def create_schedule(request: Request):
     targets = body.get("targets", [])
     channel = body.get("channel", "general")
     spec = body.get("spec", "")
-    one_shot = body.get("one_shot", False)
+    one_shot = bool(body.get("one_shot", False))
     send_at_date = body.get("send_at_date", "")  # "YYYY-MM-DD" for one-shot
     created_by = body.get("created_by", "user")
     if not prompt or not targets or not spec:
         return JSONResponse({"error": "prompt, targets, and spec are required"}, status_code=400)
+    # A relative send ("in 2h 30m") is resolved by the client, which posts the
+    # resulting moment directly; there is no recurrence to parse out of it.
+    # A send_at names a single moment, so it only means anything for a one-shot.
+    # A recurring request ignores it, exactly as it did before the field
+    # existed; that keeps an unparseable spec falling through to the 400 below
+    # instead of being stored as an unasked-for daily repeat.
+    explicit_send_at = None
+    if one_shot and body.get("send_at") is not None:
+        try:
+            explicit_send_at = float(body["send_at"])
+        except (TypeError, ValueError, OverflowError):
+            return JSONResponse(
+                {"error": "send_at must be an epoch timestamp"}, status_code=400
+            )
     interval_sec, daily_at = parse_schedule_spec(spec)
-    if interval_sec is None:
+    if interval_sec is None and explicit_send_at is None:
         return JSONResponse({"error": f"Invalid schedule spec: {spec}"}, status_code=400)
     # For one-shot, compute exact send_at timestamp from date + daily_at time
-    send_at = None
-    if one_shot and daily_at and send_at_date:
+    send_at = explicit_send_at
+    if send_at is None and one_shot and daily_at and send_at_date:
         import datetime as _dt
         try:
             dt = _dt.datetime.strptime(f"{send_at_date} {daily_at}", "%Y-%m-%d %H:%M")
             send_at = dt.timestamp()
         except ValueError:
             pass
-    s = schedules.create(
-        prompt=prompt, targets=targets, channel=channel,
-        interval_seconds=interval_sec, daily_at=daily_at,
-        one_shot=one_shot, send_at=send_at,
-        created_by=created_by,
-    )
+    try:
+        s = schedules.create(
+            prompt=prompt, targets=targets, channel=channel,
+            interval_seconds=interval_sec, daily_at=daily_at,
+            one_shot=one_shot, send_at=send_at,
+            created_by=created_by,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(s)
 
 
@@ -1774,14 +1828,16 @@ async def resolve_rule_proposal(msg_id: int, request: Request):
         return JSONResponse({"error": "not a rule proposal"}, status_code=400)
     body = await request.json()
     action = body.get("action", "")
-    meta = msg.get("metadata", {})
+    meta = dict(msg.get("metadata") or {})
     rule_id = meta.get("rule_id")
 
     if action == "activate" and rule_id is not None:
-        rules.activate(int(rule_id))
+        if not rules.activate(int(rule_id)):
+            return JSONResponse({"error": "Rule no longer exists."}, status_code=409)
         meta["status"] = "activated"
     elif action == "draft" and rule_id is not None:
-        rules.make_draft(int(rule_id))
+        if not rules.make_draft(int(rule_id)):
+            return JSONResponse({"error": "Rule no longer exists."}, status_code=409)
         meta["status"] = "drafted"
     elif action == "dismiss" and rule_id is not None:
         rules.delete(int(rule_id))
