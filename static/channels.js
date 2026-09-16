@@ -36,6 +36,7 @@ function renderChannelTabs() {
 
     // Preserve inline create input if it exists
     const existingCreate = container.querySelector('.channel-inline-create');
+    const scrollLeft = container.scrollLeft;
     container.innerHTML = '';
 
     for (const name of window.channelList) {
@@ -98,12 +99,7 @@ function renderChannelTabs() {
         container.appendChild(existingCreate);
     }
 
-    // Update add button disabled state
-    const addBtn = document.getElementById('channel-add-btn');
-    if (addBtn) {
-        addBtn.classList.toggle('disabled', window.channelList.length >= 8);
-    }
-
+    container.scrollLeft = scrollLeft;
     renderChannelSidebar();
 }
 
@@ -166,10 +162,6 @@ function renderChannelSidebar() {
 
     if (existingCreate) list.appendChild(existingCreate);
 
-    const addBtn = document.getElementById('channel-sidebar-add');
-    if (addBtn) {
-        addBtn.classList.toggle('disabled', window.channelList.length >= 8);
-    }
 }
 
 function _showSidebarRenameDialog(oldName) {
@@ -292,22 +284,31 @@ function _sidebarConfirmDelete(name, row, label) {
 
 function switchChannel(name) {
     if (name === window.activeChannel) return;
+    const prevChannel = window.activeChannel;
     // Save top-visible message ID for current channel
     const topId = _getTopVisibleMsgId();
     if (topId) _channelScrollMsg[window.activeChannel] = topId;
     window._setActiveChannel(name);
+    // Swap the sticky @-mention toggles to this channel's remembered set
+    if (window._onChannelSwitchMentions) window._onChannelSwitchMentions(prevChannel, name);
     window.channelUnread[name] = 0;
     localStorage.setItem('agentchattr-channel', name);
     filterMessagesByChannel();
     renderChannelTabs();
     Store.set('activeChannel', name);
+    document.querySelector('#channel-tabs .channel-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     // Restore: scroll to saved message, or bottom if none saved
     const savedId = _channelScrollMsg[name];
     if (savedId) {
         const el = document.querySelector(`.message[data-id="${savedId}"]`);
-        if (el) { el.scrollIntoView({ block: 'start' }); return; }
+        if (el) {
+            el.scrollIntoView({ block: 'start' });
+            if (typeof dayFloatRefresh === 'function') dayFloatRefresh();
+            return;
+        }
     }
     window.scrollToBottom();
+    if (typeof dayFloatRefresh === 'function') dayFloatRefresh();
 }
 
 function filterMessagesByChannel() {
@@ -325,7 +326,6 @@ function filterMessagesByChannel() {
 // ---------------------------------------------------------------------------
 
 function showChannelCreateDialog() {
-    if (window.channelList.length >= 8) return;
     // Route the inline create into the sidebar list when sidebar mode is on,
     // otherwise into the top-bar tabs — keeps the input visible either way.
     const inSidebar = document.body.classList.contains('channels-in-sidebar');

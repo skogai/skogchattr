@@ -13,7 +13,8 @@ let agentConfig = {};  // { name: { color, label } } — registered instances (u
 let baseColors = {};   // { name: { color, label } } — base agent colors (for message coloring)
 let todos = {};  // { msg_id: "todo" | "done" }
 let rules = [];  // array of rule objects from server
-let activeMentions = new Set();  // agent names with pre-@ toggled on
+let activeMentions = new Set();  // agent names with pre-@ toggled on (for the active channel)
+let _channelMentions = {};  // channel -> array of toggled agent names (per-channel memory of activeMentions)
 let replyingTo = null;  // { id, sender, text } or null
 let unreadCount = 0;    // messages received while scrolled up
 let lastMessageDate = null;  // track date for dividers (general channel)
@@ -365,9 +366,315 @@ function addCodeCopyButtons(container) {
     }
 }
 
+// Render saved history in small batches, without per-message layout reads.
+let historyLoading = true;
+let historyReceived = false;
+let pendingHistory = [];
+let pendingLiveEvents = [];
+let historyScheduled = false;
+let historyGeneration = 0;
+// A task queue yields between batches and also runs in background tabs,
+// where animation frames can be suspended.
+const historyTasks = new MessageChannel();
+historyTasks.port1.onmessage = (event) => {
+    if (event.data === historyGeneration) renderHistoryBatch();
+};
+
+function setHistoryIndicator(visible) {
+    const loader = document.getElementById('loading-indicator');
+    if (!loader) return;
+    const timeline = document.getElementById('timeline');
+    const top = timeline.scrollTop;
+    const height = loader.getBoundingClientRect().height;
+    loader.classList.toggle('hidden', !visible);
+    if (!autoScroll && top > height) {
+        timeline.scrollTo({ top: top + loader.getBoundingClientRect().height - height, behavior: 'instant' });
+    }
+}
+
+function scheduleHistoryRender() {
+    if (!historyScheduled) {
+        historyScheduled = true;
+        historyTasks.port2.postMessage(historyGeneration);
+    }
+}
+
+function renderHistoryBatch() {
+    historyScheduled = false;
+    const fragment = document.createDocumentFragment();
+    for (const msg of pendingHistory.splice(0, 100)) {
+        appendMessage(msg, { history: true, container: fragment });
+    }
+    const breadcrumbs = [...fragment.querySelectorAll('.job-breadcrumb')];
+    const container = document.getElementById('messages');
+    container.appendChild(fragment);
+    for (const el of breadcrumbs) window._collapseJobBreadcrumbs?.(container, el);
+    if (autoScroll) scrollToBottom(true);
+    if (pendingHistory.length) {
+        scheduleHistoryRender();
+    } else if (historyReceived) {
+        historyLoading = false;
+        soundEnabled = true;
+        setHistoryIndicator(false);
+        const events = pendingLiveEvents;
+        pendingLiveEvents = [];
+        for (const event of events) handleServerEvent(event);
+        if (autoScroll) scrollToBottom(true);
+    }
+}
+
 // --- WebSocket ---
 
+function handleServerEvent(event) {
+    if (historyLoading && ['message', 'edit', 'message_update', 'delete', 'clear', 'channel_renamed', 'agent_renamed'].includes(event.type)) {
+        pendingLiveEvents.push(event);
+        return;
+    }
+    if (event.type === 'history') {
+        pendingHistory.push(...event.messages);
+        scheduleHistoryRender();
+        return;
+    }
+    if (event.type === 'history_complete') {
+        historyReceived = true;
+        scheduleHistoryRender();
+        return;
+    }
+    // Emit through Hub for modules to subscribe (PR 1 seam)
+    Hub.emit(event.type, event);
+    if (event.type === 'message_update') {
+        // Re-render an updated message in-place (e.g. decision card resolved)
+        const updated = event.message;
+        if (updated && updated.id != null) {
+            const existing = document.querySelector(`.message[data-id="${updated.id}"]`);
+            if (existing && updated.type === 'decision') {
+                // Update just the choices area within the bubble
+                const choicesEl = existing.querySelector('.decision-choices');
+                const meta = updated.metadata || {};
+                if (choicesEl && meta.resolved) {
+                    choicesEl.innerHTML = `<div class="decision-resolved">You chose: <strong>${escapeHtml(meta.chosen || '')}</strong></div>`;
+                }
+            }
+        }
+    } else if (event.type === 'message') {
+        if (document.getElementById(`message-${event.data.id}`)) return;
+        // Play notification sound for new messages from others (not joins, not when focused)
+        if (soundEnabled && !document.hasFocus() && event.data.type !== 'join' && event.data.type !== 'leave' && event.data.type !== 'summary' && event.data.sender && event.data.sender.toLowerCase() !== username.toLowerCase()) {
+            playNotificationSound(event.data.sender);
+        }
+        appendMessage(event.data);
+    } else if (event.type === 'agent_renamed') {
+        // Migrate active mentions before the agents config rebuild
+        if (activeMentions.has(event.old_name)) {
+            activeMentions.delete(event.old_name);
+            activeMentions.add(event.new_name);
+        }
+        // Migrate the per-channel remembered toggles too
+        for (const ch of Object.keys(_channelMentions)) {
+            const arr = _channelMentions[ch];
+            const idx = arr.indexOf(event.old_name);
+            if (idx !== -1) arr[idx] = event.new_name;
+        }
+        // Update sender name, color, and avatar on all existing messages in the DOM
+        const newColor = getColor(event.new_name);
+        const newAvatar = getAvatarSvg(event.new_name);
+        const newAgentKey = (resolveAgent(event.new_name.toLowerCase()) || event.new_name).toLowerCase();
+        const newHat = agentHats[newAgentKey] || '';
+        document.querySelectorAll('#messages .message').forEach(el => {
+            // Regular chat messages
+            const senderEl = el.querySelector('.msg-sender');
+            if (senderEl && senderEl.textContent === event.old_name) {
+
+                senderEl.textContent = event.new_name;
+                senderEl.style.color = newColor;
+                // Update bubble accent color
+                const bubble = el.querySelector('.chat-bubble');
+                if (bubble) bubble.style.setProperty('--bubble-color', newColor);
+                // Update avatar
+                const avatarWrap = el.querySelector('.avatar-wrap');
+                if (avatarWrap) {
+                    avatarWrap.dataset.agent = newAgentKey;
+                    const avatar = avatarWrap.querySelector('.avatar');
+                    if (avatar) {
+                        avatar.style.backgroundColor = newColor;
+                        avatar.innerHTML = newAvatar;
+                    }
+                    // Update hat
+                    let hatEl = avatarWrap.querySelector('.hat-overlay');
+                    if (newHat) {
+                        if (!hatEl) {
+                            hatEl = document.createElement('div');
+                            hatEl.className = 'hat-overlay';
+                            avatarWrap.appendChild(hatEl);
+                        }
+                        hatEl.dataset.agent = newAgentKey;
+                        hatEl.innerHTML = newHat;
+                    } else if (hatEl) {
+                        hatEl.remove();
+                    }
+                }
+            }
+            // Join/leave messages (separate structure, no .msg-sender)
+            const joinText = el.querySelector('.join-text strong');
+            if (joinText && joinText.textContent === event.old_name) {
+
+                joinText.textContent = event.new_name;
+                joinText.style.color = newColor;
+                const joinDot = el.querySelector('.join-dot');
+                if (joinDot) joinDot.style.background = newColor;
+            }
+        });
+    } else if (event.type === 'agents') {
+        applyAgentConfig(event.data);
+    } else if (event.type === 'base_colors') {
+        baseColors = event.data || {};
+    } else if (event.type === 'todos') {
+        todos = {};
+        for (const [id, status] of Object.entries(event.data)) {
+            todos[parseInt(id)] = status;
+        }
+    } else if (event.type === 'todo_update') {
+        const d = event.data;
+        if (d.status === null) {
+            delete todos[d.id];
+        } else {
+            todos[d.id] = d.status;
+        }
+        updateTodoState(d.id, d.status);
+    } else if (event.type === 'status') {
+        updateStatus(event.data);
+    } else if (event.type === 'typing') {
+        updateTyping(event.agent, event.active);
+    } else if (event.type === 'settings') {
+        applySettings(event.data);
+    } else if (event.type === 'delete') {
+        handleDeleteBroadcast(event.ids);
+    } else if (event.type === 'rules' || event.type === 'decisions') {
+        rules = event.data || [];
+        renderRulesPanel();
+        updateRulesBadge();
+    } else if (event.type === 'rule' || event.type === 'decision') {
+        handleRuleEvent(event.action, event.data);
+    } else if (event.type === 'hats') {
+        agentHats = event.data || {};
+        updateAllHats();
+    } else if (event.type === 'schedules') {
+        schedulesList = event.data || [];
+        renderSchedulesBar();
+    } else if (event.type === 'schedule') {
+        handleScheduleEvent(event.action, event.data);
+    } else if (event.type === 'pending_instance') {
+        // A new 2nd+ instance registered — queue naming lightbox
+        _pendingNameQueue.push({
+            name: event.name,
+            label: event.label || event.name,
+            color: event.color || '#888',
+            base: event.base || '',
+        });
+        _showNextPendingName();
+    } else if (event.type === 'channel_renamed') {
+        // Migrate per-channel client state to the new name
+        const channelIndex = channelList.indexOf(event.old_name);
+        if (channelIndex !== -1) {
+            channelList = [...channelList];
+            channelList[channelIndex] = event.new_name;
+        }
+        if (channelUnread[event.old_name] !== undefined) {
+            channelUnread[event.new_name] = channelUnread[event.old_name];
+            delete channelUnread[event.old_name];
+        }
+        if (_channelMentions[event.old_name] !== undefined) {
+            _channelMentions[event.new_name] = _channelMentions[event.old_name];
+            delete _channelMentions[event.old_name];
+        }
+        if (pendingChannelSwitch === event.old_name) {
+            pendingChannelSwitch = event.new_name;
+        }
+        // Migrate data-channel on existing DOM elements
+        const container = document.getElementById('messages');
+        for (const el of container.children) {
+            if ((el.dataset.channel || 'general') === event.old_name) {
+                el.dataset.channel = event.new_name;
+            }
+        }
+        // Update per-channel date tracking
+        if (lastMessageDates[event.old_name]) {
+            lastMessageDates[event.new_name] = lastMessageDates[event.old_name];
+            delete lastMessageDates[event.old_name];
+        }
+        // Update active channel if we were on the renamed one
+        if (activeChannel === event.old_name) {
+            activeChannel = event.new_name;
+            localStorage.setItem('agentchattr-channel', event.new_name);
+            Store.set('activeChannel', event.new_name);
+        }
+        filterMessagesByChannel();
+        renderChannelTabs();
+    } else if (event.type === 'edit') {
+        // A message was edited/demoted — re-render it in place
+        const updatedMsg = event.message;
+        if (updatedMsg && updatedMsg.id != null) {
+            const el = document.querySelector(`.message[data-id="${updatedMsg.id}"]`);
+            if (el) {
+                // Insert a fresh message after the old one, then remove the old
+                const placeholder = document.createElement('div');
+                el.after(placeholder);
+                el.remove();
+                // Temporarily hijack container to insert at the right spot
+                const container = document.getElementById('messages');
+                appendMessage(updatedMsg, { history: true });
+                // Move the newly appended message to where the old one was
+                const newEl = container.lastElementChild;
+                if (newEl && newEl.dataset.id == updatedMsg.id) {
+                    placeholder.replaceWith(newEl);
+                } else {
+                    placeholder.remove();
+                }
+            }
+        }
+    } else if (event.type === 'clear') {
+        const _clearDbgList = document.getElementById('jobs-list');
+        const _clearDbgBefore = _clearDbgList ? _clearDbgList.children.length : -1;
+        console.log('CLEAR_DEBUG clear event received, channel=' + (event.channel || 'ALL'), 'jobs-panel-children-before=' + _clearDbgBefore);
+        const clearChannel = event.channel || null;
+        if (clearChannel) {
+            // Per-channel clear: remove only messages from that channel
+            const container = document.getElementById('messages');
+            const toRemove = [];
+            for (const el of container.children) {
+                const isDivider = el.classList.contains('date-divider');
+                if ((el.dataset.id || isDivider) && (el.dataset.channel || 'general') === clearChannel) {
+                    toRemove.push(el);
+                }
+            }
+            toRemove.forEach(el => el.remove());
+            // Clean up orphaned date dividers and reset tracking
+            delete lastMessageDates[clearChannel];
+            filterMessagesByChannel();
+        } else {
+            // Full clear (all channels)
+            document.getElementById('messages').innerHTML = '';
+            lastMessageDate = null;
+            lastMessageDates = {};
+        }
+        dayFloatRefresh();
+        requestAnimationFrame(() => {
+            const _clearDbgAfter = _clearDbgList ? _clearDbgList.children.length : -1;
+            console.log('CLEAR_DEBUG after clear (next frame), jobs-panel-children=' + _clearDbgAfter);
+        });
+    } else if (event.type === 'reload') {
+        // Server requests full page reload (e.g. after import)
+        location.reload();
+    }
+}
+
 function connectWebSocket() {
+    historyGeneration++;
+    historyScheduled = false;
+    historyLoading = true;
+    historyReceived = false;
+    pendingHistory = [];
+    pendingLiveEvents = [];
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(SESSION_TOKEN)}`);
 
@@ -379,220 +686,7 @@ function connectWebSocket() {
         }
     };
 
-    ws.onmessage = (e) => {
-        const event = JSON.parse(e.data);
-        // Emit through Hub for modules to subscribe (PR 1 seam)
-        Hub.emit(event.type, event);
-        if (event.type === 'message_update') {
-            // Re-render an updated message in-place (e.g. decision card resolved)
-            const updated = event.message;
-            if (updated && updated.id) {
-                const existing = document.querySelector(`.message[data-id="${updated.id}"]`);
-                if (existing && updated.type === 'decision') {
-                    // Update just the choices area within the bubble
-                    const choicesEl = existing.querySelector('.decision-choices');
-                    const meta = updated.metadata || {};
-                    if (choicesEl && meta.resolved) {
-                        choicesEl.innerHTML = `<div class="decision-resolved">You chose: <strong>${escapeHtml(meta.chosen || '')}</strong></div>`;
-                    }
-                }
-            }
-        } else if (event.type === 'message') {
-            // Play notification sound for new messages from others (not joins, not when focused)
-            if (soundEnabled && !document.hasFocus() && event.data.type !== 'join' && event.data.type !== 'leave' && event.data.type !== 'summary' && event.data.sender && event.data.sender.toLowerCase() !== username.toLowerCase()) {
-                playNotificationSound(event.data.sender);
-            }
-            appendMessage(event.data);
-        } else if (event.type === 'agent_renamed') {
-            // Migrate active mentions before the agents config rebuild
-            if (activeMentions.has(event.old_name)) {
-                activeMentions.delete(event.old_name);
-                activeMentions.add(event.new_name);
-            }
-            // Update sender name, color, and avatar on all existing messages in the DOM
-            const newColor = getColor(event.new_name);
-            const newAvatar = getAvatarSvg(event.new_name);
-            const newAgentKey = (resolveAgent(event.new_name.toLowerCase()) || event.new_name).toLowerCase();
-            const newHat = agentHats[newAgentKey] || '';
-            document.querySelectorAll('#messages .message').forEach(el => {
-                // Regular chat messages
-                const senderEl = el.querySelector('.msg-sender');
-                if (senderEl && senderEl.textContent === event.old_name) {
-
-                    senderEl.textContent = event.new_name;
-                    senderEl.style.color = newColor;
-                    // Update bubble accent color
-                    const bubble = el.querySelector('.chat-bubble');
-                    if (bubble) bubble.style.setProperty('--bubble-color', newColor);
-                    // Update avatar
-                    const avatarWrap = el.querySelector('.avatar-wrap');
-                    if (avatarWrap) {
-                        avatarWrap.dataset.agent = newAgentKey;
-                        const avatar = avatarWrap.querySelector('.avatar');
-                        if (avatar) {
-                            avatar.style.backgroundColor = newColor;
-                            avatar.innerHTML = newAvatar;
-                        }
-                        // Update hat
-                        let hatEl = avatarWrap.querySelector('.hat-overlay');
-                        if (newHat) {
-                            if (!hatEl) {
-                                hatEl = document.createElement('div');
-                                hatEl.className = 'hat-overlay';
-                                avatarWrap.appendChild(hatEl);
-                            }
-                            hatEl.dataset.agent = newAgentKey;
-                            hatEl.innerHTML = newHat;
-                        } else if (hatEl) {
-                            hatEl.remove();
-                        }
-                    }
-                }
-                // Join/leave messages (separate structure, no .msg-sender)
-                const joinText = el.querySelector('.join-text strong');
-                if (joinText && joinText.textContent === event.old_name) {
-
-                    joinText.textContent = event.new_name;
-                    joinText.style.color = newColor;
-                    const joinDot = el.querySelector('.join-dot');
-                    if (joinDot) joinDot.style.background = newColor;
-                }
-            });
-        } else if (event.type === 'agents') {
-            applyAgentConfig(event.data);
-        } else if (event.type === 'base_colors') {
-            baseColors = event.data || {};
-        } else if (event.type === 'todos') {
-            todos = {};
-            for (const [id, status] of Object.entries(event.data)) {
-                todos[parseInt(id)] = status;
-            }
-        } else if (event.type === 'todo_update') {
-            const d = event.data;
-            if (d.status === null) {
-                delete todos[d.id];
-            } else {
-                todos[d.id] = d.status;
-            }
-            updateTodoState(d.id, d.status);
-        } else if (event.type === 'status') {
-            updateStatus(event.data);
-            // Status is the last event sent on connect — enable sounds after history
-            if (!soundEnabled) {
-                soundEnabled = true;
-                const loader = document.getElementById('loading-indicator');
-                if (loader) loader.classList.add('hidden');
-                filterMessagesByChannel();
-                renderChannelTabs();
-                // Ensure refresh/reconnect lands on the latest visible message.
-                requestAnimationFrame(() => {
-                    autoScroll = true;
-                    scrollToBottom();
-                });
-            }
-        } else if (event.type === 'typing') {
-            updateTyping(event.agent, event.active);
-        } else if (event.type === 'settings') {
-            applySettings(event.data);
-        } else if (event.type === 'delete') {
-            handleDeleteBroadcast(event.ids);
-        } else if (event.type === 'rules' || event.type === 'decisions') {
-            rules = event.data || [];
-            renderRulesPanel();
-            updateRulesBadge();
-        } else if (event.type === 'rule' || event.type === 'decision') {
-            handleRuleEvent(event.action, event.data);
-        } else if (event.type === 'hats') {
-            agentHats = event.data || {};
-            updateAllHats();
-        } else if (event.type === 'schedules') {
-            schedulesList = event.data || [];
-            renderSchedulesBar();
-        } else if (event.type === 'schedule') {
-            handleScheduleEvent(event.action, event.data);
-        } else if (event.type === 'pending_instance') {
-            // A new 2nd+ instance registered — queue naming lightbox
-            _pendingNameQueue.push({
-                name: event.name,
-                label: event.label || event.name,
-                color: event.color || '#888',
-                base: event.base || '',
-            });
-            _showNextPendingName();
-        } else if (event.type === 'channel_renamed') {
-            // Migrate data-channel on existing DOM elements
-            const container = document.getElementById('messages');
-            for (const el of container.children) {
-                if ((el.dataset.channel || 'general') === event.old_name) {
-                    el.dataset.channel = event.new_name;
-                }
-            }
-            // Update per-channel date tracking
-            if (lastMessageDates[event.old_name]) {
-                lastMessageDates[event.new_name] = lastMessageDates[event.old_name];
-                delete lastMessageDates[event.old_name];
-            }
-            // Update active channel if we were on the renamed one
-            if (activeChannel === event.old_name) {
-                activeChannel = event.new_name;
-                localStorage.setItem('agentchattr-channel', event.new_name);
-                Store.set('activeChannel', event.new_name);
-            }
-        } else if (event.type === 'edit') {
-            // A message was edited/demoted — re-render it in place
-            const updatedMsg = event.message;
-            if (updatedMsg && updatedMsg.id != null) {
-                const el = document.querySelector(`.message[data-id="${updatedMsg.id}"]`);
-                if (el) {
-                    // Insert a fresh message after the old one, then remove the old
-                    const placeholder = document.createElement('div');
-                    el.after(placeholder);
-                    el.remove();
-                    // Temporarily hijack container to insert at the right spot
-                    const container = document.getElementById('messages');
-                    appendMessage(updatedMsg);
-                    // Move the newly appended message to where the old one was
-                    const newEl = container.lastElementChild;
-                    if (newEl && newEl.dataset.id == updatedMsg.id) {
-                        placeholder.replaceWith(newEl);
-                    } else {
-                        placeholder.remove();
-                    }
-                }
-            }
-        } else if (event.type === 'clear') {
-            const _clearDbgList = document.getElementById('jobs-list');
-            const _clearDbgBefore = _clearDbgList ? _clearDbgList.children.length : -1;
-            console.log('CLEAR_DEBUG clear event received, channel=' + (event.channel || 'ALL'), 'jobs-panel-children-before=' + _clearDbgBefore);
-            const clearChannel = event.channel || null;
-            if (clearChannel) {
-                // Per-channel clear: remove only messages from that channel
-                const container = document.getElementById('messages');
-                const toRemove = [];
-                for (const el of container.children) {
-                    if (el.dataset.id && (el.dataset.channel || 'general') === clearChannel) {
-                        toRemove.push(el);
-                    }
-                }
-                toRemove.forEach(el => el.remove());
-                // Clean up orphaned date dividers and reset tracking
-                delete lastMessageDates[clearChannel];
-                filterMessagesByChannel();
-            } else {
-                // Full clear (all channels)
-                document.getElementById('messages').innerHTML = '';
-                lastMessageDate = null;
-                lastMessageDates = {};
-            }
-            requestAnimationFrame(() => {
-                const _clearDbgAfter = _clearDbgList ? _clearDbgList.children.length : -1;
-                console.log('CLEAR_DEBUG after clear (next frame), jobs-panel-children=' + _clearDbgAfter);
-            });
-        } else if (event.type === 'reload') {
-            // Server requests full page reload (e.g. after import)
-            location.reload();
-        }
-    };
+    ws.onmessage = (e) => handleServerEvent(JSON.parse(e.data));
 
     ws.onclose = (e) => {
         // Server sends 4003 when session token is invalid (server restarted).
@@ -604,8 +698,13 @@ function connectWebSocket() {
         }
         console.log('Disconnected, reconnecting in 2s...');
         soundEnabled = false;  // suppress sounds during reconnect history replay
-        const loader = document.getElementById('loading-indicator');
-        if (loader) loader.classList.remove('hidden');
+        historyGeneration++;
+        historyScheduled = false;
+        historyLoading = true;
+        historyReceived = false;
+        pendingHistory = [];
+        pendingLiveEvents = [];
+        setHistoryIndicator(true);
         reconnectTimer = setTimeout(connectWebSocket, 2000);
     };
 
@@ -659,16 +758,82 @@ function maybeInsertDateDivider(container, msg) {
     }
 }
 
+// --- Floating day indicator ---
+
+let dayFloatDividers = null;   // live HTMLCollection — follows divider add/remove
+let dayFloatFadeTimer = null;
+let dayFloatRafPending = false;
+
+function dayFloatLabel() {
+    if (!dayFloatDividers) {
+        const container = document.getElementById('messages');
+        if (!container) return null;
+        dayFloatDividers = container.getElementsByClassName('date-divider');
+    }
+    const scroll = document.getElementById('timeline');
+    if (!scroll) return null;
+    const top = scroll.getBoundingClientRect().top;
+    let label = null;
+    for (const d of dayFloatDividers) {
+        if (d.style.display === 'none') continue;
+        if (d.getBoundingClientRect().top <= top) {
+            label = d.textContent;
+        } else {
+            break;
+        }
+    }
+    return label;
+}
+
+function dayFloatHide() {
+    const float = document.getElementById('day-float');
+    if (!float) return;
+    if (dayFloatFadeTimer) { clearTimeout(dayFloatFadeTimer); dayFloatFadeTimer = null; }
+    float.classList.remove('visible');
+}
+
+function dayFloatOnScroll() {
+    if (dayFloatRafPending) return;
+    dayFloatRafPending = true;
+    requestAnimationFrame(() => {
+        dayFloatRafPending = false;
+        const float = document.getElementById('day-float');
+        if (!float) return;
+        const label = dayFloatLabel();
+        if (!label) { dayFloatHide(); return; }
+        float.querySelector('span').textContent = label;
+        float.classList.add('visible');
+        if (dayFloatFadeTimer) clearTimeout(dayFloatFadeTimer);
+        dayFloatFadeTimer = setTimeout(() => {
+            dayFloatFadeTimer = null;
+            float.classList.remove('visible');
+        }, 1200);
+    });
+}
+
+function dayFloatRefresh() {
+    // Recompute without starting the show/fade cycle: swap the label if the
+    // pill is relevant, hide (cancelling any fade) if no day is above the top.
+    const float = document.getElementById('day-float');
+    if (!float) return;
+    const label = dayFloatLabel();
+    if (!label) { dayFloatHide(); return; }
+    float.querySelector('span').textContent = label;
+}
+
 // --- Messages ---
 
-function appendMessage(msg) {
-    const container = document.getElementById('messages');
+function appendMessage(msg, options = {}) {
+    // History replay and a live delivery can contain the same saved message.
+    if (document.getElementById(`message-${msg.id}`)) return;
+    const container = options.container || document.getElementById('messages');
 
     // Insert date divider if needed
     maybeInsertDateDivider(container, msg);
 
     const el = document.createElement('div');
     el.className = 'message';
+    el.id = `message-${msg.id}`;
     el.dataset.id = msg.id;
     const msgChannel = msg.channel || 'general';
     el.dataset.channel = msgChannel;
@@ -810,7 +975,7 @@ function appendMessage(msg) {
                 ).join('') + '</div>';
             }
         }
-        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span></div><div class="msg-text">${textHtml}</div>${choicesHtml}${attachmentsHtml}<button class="convert-job-pill" onclick="startJobFromMessage(${msg.id}); event.stopPropagation();" title="Convert to job">convert to job</button><button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
+        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span><span class="msg-num">#${msg.id}</span></div><div class="msg-text">${textHtml}</div>${choicesHtml}${attachmentsHtml}<button class="convert-job-pill" onclick="startJobFromMessage(${msg.id}); event.stopPropagation();" title="Convert to job">convert to job</button><button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
         if (todoStatus) el.classList.add('msg-todo', `msg-todo-${todoStatus}`);
         if (msg.metadata?.session_output) el.classList.add('session-output');
 
@@ -822,7 +987,7 @@ function appendMessage(msg) {
     if (msgChannel !== activeChannel) {
         el.style.display = 'none';
         // Track unread for background channels (skip joins/leaves and initial history load)
-        if (soundEnabled && msg.type !== 'join' && msg.type !== 'leave') {
+        if (!options.history && soundEnabled && msg.type !== 'join' && msg.type !== 'leave') {
             channelUnread[msgChannel] = (channelUnread[msgChannel] || 0) + 1;
             renderChannelTabs();
             // Play soft pluck for cross-channel chat messages from others (only when focused)
@@ -835,11 +1000,11 @@ function appendMessage(msg) {
     container.appendChild(el);
 
     // Collapse consecutive job_created messages into a group
-    if (msg.type === 'job_created' && window._collapseJobBreadcrumbs) {
+    if (!options.history && msg.type === 'job_created' && window._collapseJobBreadcrumbs) {
         window._collapseJobBreadcrumbs(container, el);
     }
 
-    if (msgChannel !== activeChannel) return;  // don't scroll for hidden messages
+    if (options.history || msgChannel !== activeChannel) return;  // history scrolls once per batch
 
     if (autoScroll) {
         scrollToBottom();
@@ -903,9 +1068,9 @@ function colorMentions(textHtml) {
     });
 }
 
-function scrollToBottom() {
+function scrollToBottom(instant = false) {
     const timeline = document.getElementById('timeline');
-    timeline.scrollTop = timeline.scrollHeight;
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: instant ? 'instant' : 'auto' });
     unreadCount = 0;
     updateScrollAnchor();
 }
@@ -1732,7 +1897,14 @@ let pendingChannelSwitch = null;
 function applySettings(data) {
     if (data.title) {
         document.getElementById('room-title').textContent = data.title;
-        document.title = data.title;
+        // Tab title carries both names, so several servers are distinguishable
+        document.title = data.subtitle ? data.title + ' - ' + data.subtitle : data.title;
+    }
+    if (data.subtitle !== undefined) {
+        const subEl = document.getElementById('room-subtitle');
+        if (subEl) subEl.textContent = data.subtitle;
+        const subInput = document.getElementById('setting-subtitle');
+        if (subInput) subInput.value = data.subtitle;
     }
     if (data.username) {
         username = data.username;
@@ -1857,6 +2029,7 @@ function clearChat() {
 
 function saveSettings() {
     const newUsername = document.getElementById('setting-username').value.trim();
+    const newSubtitle = document.getElementById('setting-subtitle').value.trim();
     const newFont = document.getElementById('setting-font').value;
     const newHops = document.getElementById('setting-hops').value;
     const histVal = document.getElementById('setting-history').value;
@@ -1869,6 +2042,7 @@ function saveSettings() {
             type: 'update_settings',
             data: {
                 username: newUsername || 'user',
+                subtitle: newSubtitle,
                 font: newFont,
                 max_agent_hops: parseInt(newHops) || 4,
                 history_limit: newHistory,
@@ -1881,7 +2055,7 @@ function saveSettings() {
 
 function setupSettingsKeys() {
     // Auto-save on blur/Enter for text/number fields
-    for (const id of ['setting-username', 'setting-hops']) {
+    for (const id of ['setting-username', 'setting-subtitle', 'setting-hops']) {
         const el = document.getElementById(id);
         el.addEventListener('blur', () => saveSettings());
         el.addEventListener('keydown', (e) => {
@@ -2097,6 +2271,7 @@ function updateSlashMenu(text) {
 function selectSlashCommand(cmd) {
     const input = document.getElementById('input');
     input.value = cmd;
+    restartVoiceAfterEdit();
     input.focus();
     document.getElementById('slash-menu').classList.add('hidden');
     slashMenuVisible = false;
@@ -2194,6 +2369,7 @@ function selectMention(name) {
     const after = text.slice(cursor);
     const mention = `@${name} `;
     input.value = before + mention + after;
+    restartVoiceAfterEdit();
     const newPos = mentionMenuStart + mention.length;
     input.setSelectionRange(newPos, newPos);
     input.focus();
@@ -2272,11 +2448,15 @@ function setupInput() {
 
     // Auto-resize + slash menu + mention menu + send button state
     function onInputChange() {
+        restartVoiceAfterEdit();
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
         updateSlashMenu(input.value);
         updateMentionMenu();
         updateSendButton();
+        // Targets come from the composer, so the schedule popover's state goes
+        // stale as soon as this changes. It no-ops while the popover is closed.
+        updateSchedulePopoverState();
     }
     input.addEventListener('input', onInputChange);
     // Voice typing doesn't always fire 'input' — catch with additional events
@@ -2358,6 +2538,7 @@ function sendMessage() {
     }
 
     input.value = '';
+    restartVoiceAfterEdit();
     input.style.height = 'auto';
     clearAttachments();
     cancelReply();
@@ -2484,6 +2665,10 @@ function setupScroll() {
     const timeline = document.getElementById('timeline');
     const messages = document.getElementById('messages');
 
+    timeline.addEventListener('wheel', (event) => {
+        if (event.deltaY < 0) autoScroll = false;
+    }, { passive: true });
+
     timeline.addEventListener('scroll', () => {
         const distFromBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
         autoScroll = distFromBottom < 60;
@@ -2492,11 +2677,12 @@ function setupScroll() {
             unreadCount = 0;
         }
         updateScrollAnchor();
+        dayFloatOnScroll();
     });
 
     // Keep pinned to bottom when content changes (e.g. images load)
     const resizeObserver = new ResizeObserver(() => {
-        if (autoScroll) {
+        if (autoScroll && !historyLoading) {
             scrollToBottom();
         }
     });
@@ -2909,6 +3095,19 @@ function renderTodosPanel() {
 
 // --- Mention toggles ---
 
+// Called by switchChannel (channels.js) so the sticky @-tag toggles are
+// remembered per channel. Prevents carrying a tag (e.g. @codex from #bugfixing)
+// into a channel where you meant to tag someone else.
+window._onChannelSwitchMentions = function(oldChannel, newChannel) {
+    if (oldChannel) _channelMentions[oldChannel] = [...activeMentions];
+    activeMentions = new Set(_channelMentions[newChannel] || []);
+    // Reflect the swapped state on the toggle buttons
+    for (const btn of document.querySelectorAll('.mention-toggle')) {
+        btn.classList.toggle('active', activeMentions.has(btn.dataset.agent));
+    }
+    if (typeof updateSchedulePopoverState === 'function') updateSchedulePopoverState();
+};
+
 function buildMentionToggles() {
     const container = document.getElementById('mention-toggles');
     container.innerHTML = '';
@@ -2949,6 +3148,9 @@ function buildMentionToggles() {
 
 let recognition = null;
 let isListening = false;
+let voiceText = '';
+let voiceRestartPending = false;
+let voiceRestartTimer = null;
 
 function focusComposerInput() {
     const input = document.getElementById('input');
@@ -2962,77 +3164,92 @@ function focusComposerInput() {
 }
 
 function toggleVoice() {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-        alert('Speech recognition not supported — use Chrome or Edge.');
-        return;
-    }
-
     if (isListening) {
         stopVoice();
         return;
     }
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+        alert('Speech recognition not supported — use Chrome or Edge.');
+        return;
+    }
+    if (!focusComposerInput()) return;
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SpeechRecognition();
-    recognition.lang = 'en-GB';
-    recognition.continuous = true;
-    recognition.interimResults = true;
-
-    const input = focusComposerInput();
-    if (!input) return;
-    const baseText = input.value;
-    let finalTranscript = '';
+    // Reserve the recording immediately, including while start/permission is pending.
+    isListening = true;
     const micButton = document.getElementById('mic');
+    micButton.classList.add('recording');
+    micButton.setAttribute('aria-pressed', 'true');
+    startVoiceRecognition();
+}
 
-    recognition.onstart = () => {
-        isListening = true;
-        micButton.classList.add('recording');
-        micButton.setAttribute('aria-pressed', 'true');
-        focusComposerInput();
-    };
+function scheduleVoiceRestart() {
+    clearTimeout(voiceRestartTimer);
+    // Avoid restarting the microphone for every keystroke while the user edits.
+    voiceRestartTimer = setTimeout(startVoiceRecognition, 250);
+}
 
-    recognition.onresult = (e) => {
-        let interim = '';
-        finalTranscript = '';
-        for (let i = 0; i < e.results.length; i++) {
-            const t = e.results[i][0].transcript;
-            if (e.results[i].isFinal) {
-                finalTranscript += t;
-            } else {
-                interim += t;
-            }
-        }
-        input.value = baseText + (baseText ? ' ' : '') + finalTranscript + interim;
-        focusComposerInput();
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-    };
+function restartVoiceAfterEdit() {
+    const input = document.getElementById('input');
+    if (!isListening || !input || input.value === voiceText) return;
+    voiceText = input.value;
+    if (!recognition) {
+        scheduleVoiceRestart();
+    } else if (!voiceRestartPending) {
+        voiceRestartPending = true;
+        try { recognition.abort(); } catch (_) { stopVoice(); }
+    }
+}
 
-    recognition.onerror = (e) => {
-        console.error('Speech error:', e.error);
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-            alert('Microphone access was blocked. Allow microphone access in Chrome and try again.');
-            stopVoice();
-        } else if (e.error === 'no-speech' || e.error === 'aborted') {
-            // no-speech: Chrome fires after ~5s silence — keep listening
-            // aborted: fires during restart cycle — safe to ignore
-            console.log('Speech:', e.error, '— still listening...');
-        } else {
-            stopVoice();
-        }
-    };
-
-    recognition.onend = () => {
-        // If still supposed to be listening (e.g. after no-speech), restart
-        if (isListening) {
-            try { recognition.start(); } catch (_) { stopVoice(); }
-        } else {
-            stopVoice();
-        }
-    };
+function startVoiceRecognition() {
+    clearTimeout(voiceRestartTimer);
+    voiceRestartTimer = null;
+    if (!isListening || recognition) return;
+    const input = document.getElementById('input');
+    const baseText = input.value;
+    voiceText = baseText;
+    voiceRestartPending = false;
 
     try {
-        recognition.start();
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const current = new SpeechRecognition();
+        recognition = current;
+        current.lang = 'en-GB';
+        current.continuous = true;
+        current.interimResults = true;
+
+        current.onresult = (e) => {
+            if (!isListening || recognition !== current || voiceRestartPending) return;
+            // Also protect programmatic edits that did not dispatch an input event.
+            if (input.value !== voiceText) {
+                restartVoiceAfterEdit();
+                return;
+            }
+            const transcript = Array.from(e.results, result => result[0].transcript).join('');
+            const separator = baseText && transcript && !/\s$/.test(baseText) && !/^\s/.test(transcript) ? ' ' : '';
+            voiceText = baseText + separator + transcript;
+            input.value = voiceText;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+
+        current.onerror = (e) => {
+            if (!isListening || recognition !== current) return;
+            if (e.error === 'no-speech' || e.error === 'aborted') return;
+            stopVoice();
+            if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+                alert('Microphone access was blocked. Allow microphone access in Chrome and try again.');
+            } else {
+                console.error('Speech error:', e.error);
+            }
+        };
+
+        current.onend = () => {
+            if (!isListening || recognition !== current) return;
+            recognition = null;
+            if (voiceRestartPending) scheduleVoiceRestart();
+            else startVoiceRecognition();
+        };
+
+        current.start();
     } catch (e) {
         console.error('Speech start failed:', e);
         stopVoice();
@@ -3041,14 +3258,19 @@ function toggleVoice() {
 
 function stopVoice() {
     isListening = false;
+    clearTimeout(voiceRestartTimer);
+    voiceRestartTimer = null;
+    voiceRestartPending = false;
+    const current = recognition;
+    recognition = null;
     const micButton = document.getElementById('mic');
     if (micButton) {
         micButton.classList.remove('recording');
         micButton.setAttribute('aria-pressed', 'false');
     }
-    if (recognition) {
-        try { recognition.stop(); } catch (_) {}
-        recognition = null;
+    // Invalidate this run before abort: its late events must not touch a new run.
+    if (current) {
+        try { current.abort(); } catch (_) {}
     }
     focusComposerInput();
 }
@@ -3343,7 +3565,22 @@ function formatScheduleTime(ts) {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+function formatOneShotWhen(ts) {
+    if (!ts) return 'once';
+    const d = new Date(ts * 1000);
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const today = new Date();
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    if (d.toDateString() === today.toDateString()) return 'once at ' + time;
+    if (d.toDateString() === tomorrow.toDateString()) return 'once tomorrow at ' + time;
+    const day = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    return 'once on ' + day + ' at ' + time;
+}
+
 function formatScheduleInterval(s) {
+    // A one-shot has no recurrence; its next_run is the whole story.
+    if (s.one_shot) return formatOneShotWhen(s.next_run);
     if (s.daily_at) return 'daily at ' + s.daily_at;
     const sec = s.interval_seconds || 0;
     if (sec < 3600) return 'every ' + Math.round(sec / 60) + 'm';
@@ -3402,6 +3639,13 @@ function toggleSchedulePopover(e) {
     pop.classList.toggle('hidden');
     if (opening) {
         populateScheduleDropdowns();
+        // Always reopen on the absolute path. Leaving "in a while" checked
+        // from a previous send would carry its past-time guard off with it.
+        const rel = document.getElementById('sched-relative');
+        if (rel && rel.checked) {
+            rel.checked = false;
+            toggleRelativeFields();
+        }
         updateSchedulePopoverState();
     }
 }
@@ -3414,9 +3658,11 @@ function closeSchedulePopover() {
 function stepNumInput(id, delta) {
     const el = document.getElementById(id);
     if (!el) return;
-    const min = parseInt(el.min) || 1;
-    const max = parseInt(el.max) || 99;
-    const val = Math.max(min, Math.min(max, (parseInt(el.value) || min) + delta));
+    // Number.isFinite, not `||`: a legitimate min/value of 0 is falsy.
+    const min = Number.isFinite(parseInt(el.min)) ? parseInt(el.min) : 1;
+    const max = Number.isFinite(parseInt(el.max)) ? parseInt(el.max) : 99;
+    const current = Number.isFinite(parseInt(el.value)) ? parseInt(el.value) : min;
+    const val = Math.max(min, Math.min(max, current + delta));
     el.value = val;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -3426,15 +3672,67 @@ function stepSchedNum(delta) {
     stepNumInput('sched-interval-val', delta);
 }
 
+let _scheduleSubmitInFlight = false;
+
+function isSchedulePopoverRecurring() {
+    return !!document.getElementById('sched-recurring')?.checked;
+}
+
+function isSchedulePopoverRelative() {
+    return !!document.getElementById('sched-relative')?.checked;
+}
+
+function readClampedNum(id) {
+    // There is no <form> here, so browsers do not enforce min/max on typed
+    // input. Clamp on read, or "999" in the hours box means a 999h delay.
+    const el = document.getElementById(id);
+    if (!el) return 0;
+    const min = Number.isFinite(parseInt(el.min)) ? parseInt(el.min) : 0;
+    const max = Number.isFinite(parseInt(el.max)) ? parseInt(el.max) : 99;
+    const val = Number.isFinite(parseInt(el.value)) ? parseInt(el.value) : min;
+    const clamped = Math.max(min, Math.min(max, val));
+    // Write back, or the box keeps showing "999" while 72 is what gets sent.
+    if (String(clamped) !== el.value) el.value = String(clamped);
+    return clamped;
+}
+
+function getScheduleRelativeSeconds() {
+    return readClampedNum('sched-rel-h') * 3600 + readClampedNum('sched-rel-m') * 60;
+}
+
 function toggleRecurringFields() {
-    const checked = document.getElementById('sched-recurring')?.checked;
+    const checked = isSchedulePopoverRecurring();
+    // Recurring and "in a while" are mutually exclusive ways to say when.
+    if (checked) {
+        const rel = document.getElementById('sched-relative');
+        if (rel) rel.checked = false;
+    }
     const fields = document.getElementById('sched-recurring-fields');
     if (fields) fields.classList.toggle('hidden', !checked);
-    // Dim both "When" and "At" rows when recurring is active
+    document.getElementById('sched-relative-fields')?.classList.add('hidden');
+    updateScheduleWhenRows();
+}
+
+function toggleRelativeFields() {
+    const checked = isSchedulePopoverRelative();
+    if (checked) {
+        const rec = document.getElementById('sched-recurring');
+        if (rec) rec.checked = false;
+    }
+    const fields = document.getElementById('sched-relative-fields');
+    if (fields) fields.classList.toggle('hidden', !checked);
+    document.getElementById('sched-recurring-fields')?.classList.add('hidden');
+    updateScheduleWhenRows();
+}
+
+function updateScheduleWhenRows() {
+    // Dim "When" and "At" whenever the send time comes from somewhere else
+    const dimmed = isSchedulePopoverRecurring() || isSchedulePopoverRelative();
     const whenRow = document.getElementById('sched-date')?.closest('.sched-pop-row');
     const atRow = document.getElementById('sched-hour')?.closest('.sched-pop-row');
-    if (whenRow) whenRow.classList.toggle('sched-dimmed', !!checked);
-    if (atRow) atRow.classList.toggle('sched-dimmed', !!checked);
+    if (whenRow) whenRow.classList.toggle('sched-dimmed', dimmed);
+    if (atRow) atRow.classList.toggle('sched-dimmed', dimmed);
+    updateSchedulePopoverState();
 }
 
 function populateScheduleDropdowns() {
@@ -3452,7 +3750,13 @@ function populateScheduleDropdowns() {
         const d = new Date(now);
         d.setDate(d.getDate() + i);
         const opt = document.createElement('option');
-        opt.value = d.toISOString().slice(0, 10);
+        // Local calendar date, not toISOString(): the option is labelled from
+        // the local day, and both the past-time guard and the server read this
+        // value as local wall-clock. A UTC date disagrees with the label for
+        // part of every day in any non-UTC timezone.
+        opt.value = d.getFullYear() + '-' +
+            String(d.getMonth() + 1).padStart(2, '0') + '-' +
+            String(d.getDate()).padStart(2, '0');
         opt.textContent = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : days[d.getDay()];
         dateEl.appendChild(opt);
     }
@@ -3504,6 +3808,14 @@ function getScheduleTime24() {
     return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
 }
 
+function getScheduleSendAtMs() {
+    // Absolute date+time the popover currently describes, in epoch ms.
+    const dateVal = document.getElementById('sched-date')?.value;
+    if (!dateVal) return null;
+    const parsed = new Date(dateVal + 'T' + getScheduleTime24() + ':00');
+    return isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
 function updateSchedulePopoverState() {
     const pop = document.getElementById('schedule-popover');
     if (!pop || pop.classList.contains('hidden')) return;
@@ -3514,12 +3826,28 @@ function updateSchedulePopoverState() {
     const mentionMatches = text.match(/@(\w[\w-]*)/g) || [];
     const targets = new Set(mentionMatches.map(m => m.slice(1)));
     for (const name of activeMentions) targets.add(name);
+
+    let problem = '';
     if (targets.size === 0) {
-        if (errEl) { errEl.textContent = 'Toggle an agent to set a target'; errEl.classList.remove('hidden'); }
+        problem = 'Toggle an agent to set a target';
+    } else if (isSchedulePopoverRelative()) {
+        if (getScheduleRelativeSeconds() <= 0) {
+            problem = 'Set how long from now';
+        }
+    } else if (!isSchedulePopoverRecurring()) {
+        const sendAt = getScheduleSendAtMs();
+        if (sendAt !== null && sendAt <= Date.now()) {
+            problem = 'That time has already passed';
+        }
+    }
+
+    if (problem) {
+        if (errEl) { errEl.textContent = problem; errEl.classList.remove('hidden'); }
         if (submitBtn) { submitBtn.disabled = true; }
     } else {
         if (errEl) { errEl.classList.add('hidden'); errEl.textContent = ''; }
-        if (submitBtn) { submitBtn.disabled = false; }
+        // Stay disabled while a submit is in flight, whatever else changed.
+        if (submitBtn) { submitBtn.disabled = _scheduleSubmitInFlight; }
     }
 }
 
@@ -3535,31 +3863,66 @@ async function submitSchedulePopover() {
 
     const errEl = document.getElementById('sched-pop-error');
 
-    if (targets.size === 0) return; // button should be disabled anyway
+    if (targets.size === 0) {
+        // Not a silent return: the button is only disabled if the state check
+        // has run since the composer last changed, so this is reachable and
+        // used to look like the click did nothing at all.
+        if (errEl) {
+            errEl.textContent = 'Toggle an agent to set a target';
+            errEl.classList.remove('hidden');
+        }
+        return;
+    }
     if (!prompt) {
         if (errEl) { errEl.textContent = 'Type a message first'; errEl.classList.remove('hidden'); }
         return;
     }
 
-    const recurring = document.getElementById('sched-recurring')?.checked;
+    const recurring = isSchedulePopoverRecurring();
+    const relative = isSchedulePopoverRelative();
     const dateVal = document.getElementById('sched-date')?.value;
     const timeVal = getScheduleTime24();
     const intervalVal = parseInt(document.getElementById('sched-interval-val')?.value) || 1;
     const intervalUnit = document.getElementById('sched-interval-unit')?.value || 'hours';
 
     // Build spec for the API
-    let spec, confirmText;
+    let spec, confirmText, sendAtEpoch = null;
     if (recurring) {
         const unitShort = intervalUnit === 'minutes' ? 'm' : intervalUnit === 'hours' ? 'h' : 'd';
         spec = `every ${intervalVal}${unitShort}`;
         confirmText = spec;
+    } else if (relative) {
+        const secs = getScheduleRelativeSeconds();
+        if (secs <= 0) {
+            if (errEl) { errEl.textContent = 'Set how long from now'; errEl.classList.remove('hidden'); }
+            return;
+        }
+        const h = Math.floor(secs / 3600);
+        const m = Math.round((secs % 3600) / 60);
+        spec = ('in ' + (h ? `${h}h ` : '') + (m ? `${m}m` : '')).trim();
+        confirmText = spec;
+        sendAtEpoch = Math.round(Date.now() / 1000 + secs);
     } else {
-        // One-shot: "daily at HH:MM" with one_shot flag
         spec = `daily at ${timeVal}`;
         confirmText = `${dateVal} at ${timeVal}`;
+        const sendAtMs = getScheduleSendAtMs();
+        if (sendAtMs === null || sendAtMs <= Date.now()) {
+            if (errEl) { errEl.textContent = 'That time has already passed'; errEl.classList.remove('hidden'); }
+            return;
+        }
+        // Post the resolved moment rather than a date string for the server to
+        // re-read in ITS timezone. Both one-shot paths now agree by
+        // construction, however far apart the browser and server clocks sit.
+        sendAtEpoch = Math.round(sendAtMs / 1000);
     }
 
-    closeSchedulePopover();
+    // The popover now stays open across the request, so nothing stops a second
+    // click landing a duplicate schedule while the first is still in flight.
+    if (_scheduleSubmitInFlight) return;
+    _scheduleSubmitInFlight = true;
+    const submitBtn = document.querySelector('.sched-pop-submit');
+    if (submitBtn) submitBtn.disabled = true;
+    let submitError = '';
 
     try {
         const body = {
@@ -3570,7 +3933,7 @@ async function submitSchedulePopover() {
             created_by: username,
         };
         if (!recurring) body.one_shot = true;
-        if (!recurring && dateVal) body.send_at_date = dateVal;
+        if (sendAtEpoch !== null) body.send_at = sendAtEpoch;
 
         const resp = await fetch('/api/schedules', {
             method: 'POST',
@@ -3581,17 +3944,29 @@ async function submitSchedulePopover() {
             body: JSON.stringify(body),
         });
         if (resp.ok) {
+            // Only now: a rejection must leave the popover open with the
+            // user's choices intact, rather than make them start over.
+            closeSchedulePopover();
             input.value = '';
+            restartVoiceAfterEdit();
             input.style.height = 'auto';
             updateSendButton();
             showScheduleConfirmation();
         } else {
             const err = await resp.json().catch(() => ({}));
-            showSlashHint(err.error || 'Failed to schedule');
+            submitError = err.error || 'Failed to schedule';
         }
     } catch (e) {
         console.error('Failed to create schedule:', e);
-        showSlashHint('Failed to create schedule');
+        submitError = 'Failed to schedule';
+    } finally {
+        _scheduleSubmitInFlight = false;
+        updateSchedulePopoverState();
+        // Validation updates the button, but must not erase a server/network error.
+        if (submitError && errEl) {
+            errEl.textContent = submitError;
+            errEl.classList.remove('hidden');
+        }
     }
 }
 

@@ -25,6 +25,22 @@ cwd = ".."
 color = "#4285f4"
 label = "Gemini"
 
+# Antigravity CLI (agy) — Google's agentic CLI, successor to the deprecated
+# Gemini CLI. It reads MCP servers from ~/.gemini/config/mcp_config.json (a
+# fixed path; no config-dir flag as of agy 1.1.7) and expects the HTTP URL under
+# the key "serverURL" — plain "url"/"httpUrl" (the Gemini-CLI shape) are ignored.
+# Verified against agy 1.1.7: this config makes agy connect and see all chat_* tools.
+[agents.antigravity]
+command = "agy"
+cwd = ".."
+color = "#00bfa5"
+label = "Antigravity"
+mcp_inject = "settings_file"
+mcp_settings_path = "~/.gemini/config/mcp_config.json"
+mcp_transport = "http"
+mcp_http_key = "serverURL"
+mcp_merge_project = true
+
 [agents.kimi]
 command = "kimi"
 cwd = ".."
@@ -71,7 +87,7 @@ enter_backend = "wm_setfocus"
 [agents.minimax]
 type = "api"
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3"
 color = "#2fe898"
 label = "MiniMax"
 api_key_env = "MINIMAX_API_KEY"
