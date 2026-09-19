@@ -1,0 +1,18 @@
+{
+  "apps": "./.app.json",
+  "author": {
+    "name": "App developer"
+  },
+  "description": "skogmcp",
+  "interface": {
+    "capabilities": [],
+    "category": "Other",
+    "defaultPrompt": null,
+    "developerName": "App developer",
+    "displayName": "skogmcp",
+    "longDescription": "skogmcp",
+    "shortDescription": "skogmcp"
+  },
+  "name": "dev-6a7fd67430208191b545e342c9fd800a",
+  "version": "1.0.0"
+}

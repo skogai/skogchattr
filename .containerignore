@@ -1,0 +1,12 @@
+.git/
+.venv/
+data/
+uploads/
+__pycache__/
+*.pyc
+*.log
+*.zip
+gang.gif
+screenshot.png
+docs/
+pr-reviews/

@@ -23,6 +23,7 @@ def _parse_args():
                "each process.",
     )
     parser.add_argument("--data-dir",      default=None, help="Override server.data_dir (path)")
+    parser.add_argument("--host",          default=None, help="Override server.host (requires --allow-network unless loopback)")
     parser.add_argument("--port",          default=None, help="Override server.port (int)")
     parser.add_argument("--mcp-http-port", default=None, help="Override mcp.http_port (int)")
     parser.add_argument("--mcp-sse-port",  default=None, help="Override mcp.sse_port (int)")

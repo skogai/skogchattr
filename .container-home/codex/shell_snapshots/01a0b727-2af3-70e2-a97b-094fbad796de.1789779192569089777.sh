@@ -1,0 +1,89 @@
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+shopt -u autocd
+shopt -u assoc_expand_once
+shopt -u cdable_vars
+shopt -u cdspell
+shopt -u checkhash
+shopt -u checkjobs
+shopt -s checkwinsize
+shopt -s cmdhist
+shopt -u compat31
+shopt -u compat32
+shopt -u compat40
+shopt -u compat41
+shopt -u compat42
+shopt -u compat43
+shopt -u compat44
+shopt -s complete_fullquote
+shopt -u direxpand
+shopt -u dirspell
+shopt -u dotglob
+shopt -u execfail
+shopt -u expand_aliases
+shopt -u extdebug
+shopt -u extglob
+shopt -s extquote
+shopt -u failglob
+shopt -s force_fignore
+shopt -s globasciiranges
+shopt -s globskipdots
+shopt -u globstar
+shopt -u gnu_errfmt
+shopt -u histappend
+shopt -u histreedit
+shopt -u histverify
+shopt -s hostcomplete
+shopt -u huponexit
+shopt -u inherit_errexit
+shopt -s interactive_comments
+shopt -u lastpipe
+shopt -u lithist
+shopt -u localvar_inherit
+shopt -u localvar_unset
+shopt -s login_shell
+shopt -u mailwarn
+shopt -u no_empty_cmd_completion
+shopt -u nocaseglob
+shopt -u nocasematch
+shopt -u noexpand_translation
+shopt -u nullglob
+shopt -s patsub_replacement
+shopt -s progcomp
+shopt -u progcomp_alias
+shopt -s promptvars
+shopt -u restricted_shell
+shopt -u shift_verbose
+shopt -s sourcepath
+shopt -u varredir_close
+shopt -u xpg_echo
+# Functions
+
+# setopts 3
+set -o braceexpand
+set -o hashall
+set -o interactive-comments
+
+# aliases 0
+
+# exports (native declarations)
+declare -x AGENTCHATTR_HOST="0.0.0.0"
+declare -x AGENTS="claude codex gemini"
+declare -x CODEX_MANAGED_BY_NPM="1"
+declare -x CODEX_MANAGED_PACKAGE_ROOT="/usr/lib/node_modules/@openai/codex"
+declare -x GPG_KEY="A035C8C19219BA821ECEA86B64E628F8D684696D"
+declare -x HOME="/home/skogix"
+declare -x HOSTNAME="6d7dfc9ad3df"
+declare -x LANG="C.UTF-8"
+declare -x PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
+declare -x PYTHON_SHA256="91bcdebfdde239a003ae93738a7fce0f9230fee5c4bc2b86f6e6e8c6f98aabe8"
+declare -x PYTHON_VERSION="3.11.16"
+declare -x SHELL="/bin/bash"
+declare -x SHLVL="2"
+declare -x TERM="tmux-256color"
+declare -x TERM_PROGRAM="tmux"
+declare -x TERM_PROGRAM_VERSION="3.5a"
+declare -x TMUX="/tmp/tmux-1000/default,5,3"
+declare -x TMUX_PANE="%6"
+declare -x container="podman"

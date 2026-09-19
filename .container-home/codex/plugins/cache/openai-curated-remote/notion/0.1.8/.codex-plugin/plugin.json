@@ -1,0 +1,55 @@
+{
+  "name": "notion",
+  "version": "0.1.8",
+  "description": "Notion workflows for implementation planning, research synthesis, meeting preparation, and knowledge capture.",
+  "author": {
+    "name": "OpenAI",
+    "email": "support@openai.com",
+    "url": "https://openai.com/"
+  },
+  "homepage": "https://www.notion.so/",
+  "repository": "https://github.com/openai/plugins",
+  "license": "MIT",
+  "keywords": [
+    "notion",
+    "wiki",
+    "notes",
+    "docs",
+    "projects",
+    "databases",
+    "documentation",
+    "research",
+    "meeting-prep",
+    "knowledge-management",
+    "planning"
+  ],
+  "skills": "./skills/",
+  "apps": "./.app.json",
+  "mcpServers": "./.mcp.json",
+  "requires_local_executor": false,
+  "interface": {
+    "displayName": "Notion",
+    "shortDescription": "Notion docs and workflows",
+    "longDescription": "Notion workflows for turning specs into implementation plans, synthesizing research into structured documentation, preparing meeting materials with workspace context, and capturing decisions or conversations into durable knowledge pages.",
+    "developerName": "Notion",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://www.notion.so/",
+    "privacyPolicyURL": "https://www.notion.com/help/privacy",
+    "termsOfServiceURL": "https://www.notion.so/legal/terms-of-use",
+    "defaultPrompt": [
+      "Find the latest decision on pricing for [project] and summarize it with the supporting page links",
+      "Create a roadmap database with properties for owner, status, quarter, and risk then populate it from this list of initiatives",
+      "Audit our top product docs for outdated info and give me a punch list of pages that should be updated first"
+    ],
+    "brandColor": "#111111",
+    "composerIcon": "./assets/notion-small.svg",
+    "logo": "./assets/notion.png",
+    "logoDark": "./assets/notion-dark.png",
+    "screenshots": []
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "apps": "./.app.json",
+  "author": {
+    "name": "Spotify"
+  },
+  "description": "Explore a new way to discover music, podcasts and audiobooks, with recommendations picked just for you.\n\nWant music to power your next run, study session, or party? Just ask and Spotify will drop the right songs, artists or playlists into your conversation.\n\nWith Spotify in ChatGPT you can:\nAsk for songs, artists, genres, or playlists and play them in Spotify.\nFind podcasts and audiobooks that match your interests.\nSpotify Premium listeners can describe a vibe and get a playlist made to match.\nGet recommendations based on your history right in your chat.",
+  "interface": {
+    "capabilities": [],
+    "category": "Entertainment",
+    "defaultPrompt": [
+      "Recommend episodes with best film pics for the awards",
+      "Create a running mix with my favorite 160 and 80 bpm tracks",
+      "Recommend some laid back playlists for my road trip"
+    ],
+    "developerName": "Spotify",
+    "displayName": "Spotify",
+    "longDescription": "Explore a new way to discover music, podcasts and audiobooks, with recommendations picked just for you.\n\nWant music to power your next run, study session, or party? Just ask and Spotify will drop the right songs, artists or playlists into your conversation.\n\nWith Spotify in ChatGPT you can:\nAsk for songs, artists, genres, or playlists and play them in Spotify.\nFind podcasts and audiobooks that match your interests.\nSpotify Premium listeners can describe a vibe and get a playlist made to match.\nGet recommendations based on your history right in your chat.",
+    "privacyPolicyURL": "https://www.spotify.com/us/legal/privacy-policy/",
+    "shortDescription": "Music and podcasts for you",
+    "supportURL": "https://support.spotify.com/",
+    "termsOfServiceURL": "https://www.spotify.com/us/legal/end-user-agreement/",
+    "websiteURL": "https://open.spotify.com"
+  },
+  "name": "app-68de829bf7648191acd70a907364c67c",
+  "version": "4.1.0"
+}

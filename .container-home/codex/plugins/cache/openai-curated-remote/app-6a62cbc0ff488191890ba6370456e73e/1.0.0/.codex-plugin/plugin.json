@@ -1,0 +1,26 @@
+{
+  "apps": "./.app.json",
+  "author": {
+    "name": "UseMyContext.ai"
+  },
+  "description": "UseMyContext gives ChatGPT the user's own context: a compiled profile of who they are, separate profiles for work and personal life, uploaded documents it can read with cited answers and exact table queries, and contexts other people have deliberately shared with them. Every tool is a read except one: suggest_update files a pending suggestion the user reviews personally on UseMyContext.ai, and nothing in ChatGPT can modify their profile or files.",
+  "interface": {
+    "capabilities": [],
+    "category": "Productivity",
+    "defaultPrompt": [
+      "Who am I? Use my context.",
+      "What do my uploaded documents say about my current project?",
+      "Remember that I prefer short, direct answers."
+    ],
+    "developerName": "UseMyContext.ai",
+    "displayName": "UseMyContext.ai",
+    "longDescription": "UseMyContext gives ChatGPT the user's own context: a compiled profile of who they are, separate profiles for work and personal life, uploaded documents it can read with cited answers and exact table queries, and contexts other people have deliberately shared with them. Every tool is a read except one: suggest_update files a pending suggestion the user reviews personally on UseMyContext.ai, and nothing in ChatGPT can modify their profile or files.",
+    "privacyPolicyURL": "https://usemycontext.ai/privacy",
+    "shortDescription": "Personal context for ChatGPT",
+    "supportURL": "https://usemycontext.ai/support",
+    "termsOfServiceURL": "https://usemycontext.ai/terms",
+    "websiteURL": "https://UseMyContext.ai"
+  },
+  "name": "app-6a62cbc0ff488191890ba6370456e73e",
+  "version": "1.0.0"
+}

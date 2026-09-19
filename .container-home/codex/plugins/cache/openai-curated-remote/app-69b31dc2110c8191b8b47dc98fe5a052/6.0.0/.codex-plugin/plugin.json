@@ -1,0 +1,27 @@
+{
+  "apps": "./.app.json",
+  "author": {
+    "name": "Dropbox"
+  },
+  "description": "The Dropbox plugin brings your files directly into ChatGPT, so you can find and work with Dropbox content in conversation. Save ChatGPT-generated content to Dropbox or create sharing links without switching tools. Your existing Dropbox permissions always apply, and ChatGPT only accesses files available to you.",
+  "interface": {
+    "capabilities": [],
+    "category": "Productivity",
+    "defaultPrompt": [
+      "save this proposal to my Dropbox",
+      "can you show me my vacation photo?",
+      "can you generate a Dropbox shareable link for this PDF?"
+    ],
+    "developerName": "Dropbox",
+    "displayName": "Dropbox",
+    "longDescription": "The Dropbox plugin brings your files directly into ChatGPT, so you can find and work with Dropbox content in conversation. Save ChatGPT-generated content to Dropbox or create sharing links without switching tools. Your existing Dropbox permissions always apply, and ChatGPT only accesses files available to you.",
+    "privacyPolicyURL": "https://www.dropbox.com/privacy",
+    "shortDescription": "Find, create, and take action",
+    "supportURL": "https://www.dropbox.com/get_help",
+    "termsOfServiceURL": "https://www.dropbox.com/terms",
+    "websiteURL": "https://www.dropbox.com"
+  },
+  "name": "app-69b31dc2110c8191b8b47dc98fe5a052",
+  "skills": "./skills",
+  "version": "6.0.0"
+}

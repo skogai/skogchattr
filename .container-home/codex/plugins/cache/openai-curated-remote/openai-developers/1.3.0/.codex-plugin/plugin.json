@@ -1,0 +1,52 @@
+{
+  "name": "openai-developers",
+  "version": "1.3.0",
+  "description": "Build with OpenAI APIs, Agents API, Agents SDK, and ChatGPT Apps, and create and save OpenAI API keys from Codex.",
+  "author": {
+    "name": "OpenAI",
+    "email": "support@openai.com",
+    "url": "https://openai.com/"
+  },
+  "homepage": "https://platform.openai.com/",
+  "repository": "https://github.com/openai/openai/tree/master/chatgpt/oai-maintained-plugins/plugins/openai-developers",
+  "license": "Proprietary",
+  "keywords": [
+    "openai-platform",
+    "api-key",
+    "agents-api",
+    "agents-sdk",
+    "agents",
+    "chatgpt-apps",
+    "apps-sdk",
+    "mcp",
+    "submissions",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "apps": "./.app.json",
+  "interface": {
+    "displayName": "OpenAI Developers",
+    "shortDescription": "Develop AI apps, agents, and ChatGPT Apps with OpenAI best practices",
+    "longDescription": "Use OpenAI Developers in Codex to build AI applications, agents, and ChatGPT Apps. Build agents with the Agents API and OpenAI-hosted sandboxes, or use the Agents SDK for application-owned agent loops, handoffs, and guardrails. Connect to the OpenAI Platform (platform.openai.com) to configure API keys, deploy Agents SDK projects locally, scaffold ChatGPT Apps, and prepare submission artifacts.",
+    "developerName": "OpenAI",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://platform.openai.com/",
+    "privacyPolicyURL": "https://openai.com/policies/privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png",
+    "defaultPrompt": [
+      "Create an OpenAI API key to use in this project",
+      "Build an agent with the Agents API",
+      "Build a ChatGPT app from my local MCP server and widget idea."
+    ],
+    "brandColor": "#10A37F",
+    "screenshots": []
+  }
+}
